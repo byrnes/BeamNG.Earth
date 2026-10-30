@@ -12,6 +12,7 @@ embankment on the flat and a tall one on a ramp. Short mapped road tunnels also 
 Where a road crosses at grade, the track stops either side of the
 carriageway (a level crossing: the road's own surface across it). Tunnels are left out. Pure given its inputs."""
 import math
+import os
 import re
 
 import numpy as np
@@ -944,6 +945,7 @@ AMERICAS_LON = -30.0            # west of this the crossbuck (the Americas), els
 # light rail mostly runs in the street (a German Stadtbahn's tracks down Bielefeld's Schildescher Strasse had crosses
 # at every side street, 2026-10-27): its crossings have devices only where the FRA's inventory or OSM's tags say
 CROSSING_DATA_ONLY = {"light_rail"}
+CROSSING_ALONG_ON = os.environ.get("BNE_CROSSING_ALONG", "on") != "off"   # posts placed along the road (_crossing_rows)
 
 
 def crossing_props(frame, tx, ty, cells, ground, left_hand=False, kits=None):
@@ -998,7 +1000,7 @@ def crossing_props(frame, tx, ty, cells, ground, left_hand=False, kits=None):
             kit = kit or CROSSING_KIT.get(sp.cls, CROSSING_KIT_DEFAULT)
             if w:
                 kit = "cross"
-            rows += _crossing_rows(pt, line, rxy, sp, kit, americas, left_hand, ground)
+            rows += _crossing_rows(pt, line, rxy, sp, kit, americas, left_hand, ground, roads)
     return rows
 
 
@@ -1045,8 +1047,31 @@ def _unit_at(line, pt):
     return d[j] / max(float(np.hypot(*d[j])), 1e-9)
 
 
-def _crossing_rows(pt, line, rxy, sp, kit, americas, left_hand, ground):
-    """The rows of one crossing: a kit at each approach (one on a one-way road), on its kerb side, facing it."""
+def _along(line, s, at):
+    """The point at arc at (m) along polyline line (s: its _arc) and the unit direction of the segment holding it; past
+    either end, straight on along the end segment."""
+    j = int(np.clip(np.searchsorted(s, at, side="right") - 1, 0, len(line) - 2))
+    d = line[j + 1] - line[j]
+    u = d / max(float(np.hypot(*d)), 1e-9)
+    return line[j] + u * (at - s[j]), u
+
+
+def _on_carriageway(q, roads):
+    """Is q (2,) on one of roads' carriageways ([(fid, spec, xy (k, 2))])?"""
+    for _fid, sp, line in roads:
+        a, d = line[:-1], np.diff(line, axis=0)
+        t = np.clip(((q - a) * d).sum(1) / np.maximum((d * d).sum(1), 1e-12), 0.0, 1.0)
+        if float(np.hypot(*(a + t[:, None] * d - q).T).min()) < sp.width / 2:
+            return True
+    return False
+
+
+def _crossing_rows(pt, line, rxy, sp, kit, americas, left_hand, ground, roads=()):
+    """The rows of one crossing: a kit at each approach (one on a one-way road), on its kerb side, facing it. Each
+    post stands `before` m back along the road from the crossing, beside it there (not along the direction of the
+    one segment at the crossing: on 26th Street in Pittsburgh, 40.4562, -79.9800, the track crosses at the corner of a
+    6 m stub into Railroad Street and the posts went 1 m off 26th's centreline and into Railroad Street, the user
+    2026-10-29); a post that lands on a carriageway of roads ([(fid, spec, xy)]) is left out."""
     r = _unit_at(line, pt)
     t = _unit_at(rxy, pt)
     sin = abs(float(r[0] * t[1] - r[1] * t[0]))
@@ -1056,13 +1081,28 @@ def _crossing_rows(pt, line, rxy, sp, kit, americas, left_hand, ground):
     if kit == "gate" and left_hand:
         group += "_l"
     dirs = (1.0, -1.0) if not sp.oneway else (-float(sp.dir or 1),)   # (sgn -1: travel along the geometry)
+    s = _arc(line)
+    if CROSSING_ALONG_ON:
+        a0, b0 = line[:-1], np.diff(line, axis=0)
+        tt = np.clip(((pt - a0) * b0).sum(1) / np.maximum((b0 * b0).sum(1), 1e-12), 0.0, 1.0)
+        j = int(np.argmin(np.hypot(*(a0 + tt[:, None] * b0 - pt).T)))
+        at = float(s[j] + tt[j] * np.hypot(*b0[j]))    # the crossing's arc along the road
     out, pts = [], []
     for sgn in dirs:
-        a = -r * sgn                                    # the travel direction towards the crossing
+        if CROSSING_ALONG_ON:
+            base, u = _along(line, s, at + sgn * before)
+            a = -u * sgn                                # the travel direction towards the crossing, there
+        else:
+            a = -r * sgn
+            base = pt - a * before
         side = np.array([a[1], -a[0]])                  # its right
         kerb = -side if left_hand else side
-        q = pt - a * before + kerb * off
+        q = base + kerb * off
+        if CROSSING_ALONG_ON and _on_carriageway(q, roads):
+            continue
         pts.append((q, side))
+    if not pts:
+        return out
     z = np.asarray(ground(np.array([q for q, _ in pts])), np.float64).ravel()
     for (q, side), zz in zip(pts, z):
         out.append([group, round(float(q[0]), 2), round(float(q[1]), 2), round(float(zz), 2),

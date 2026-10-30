@@ -10,6 +10,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import mapgeom  # noqa: E402
 import railways  # noqa: E402
 import roads  # noqa: E402
 from test_roads import FRAME, features  # noqa: E402
@@ -198,7 +199,23 @@ class RailwayTest(unittest.TestCase):
         left = railways.crossing_props(FRAME, 0, 0, [f], lambda xy: np.full(len(xy), 10.0), left_hand=True)
         self.assertTrue(all(r[0].endswith("_l") for r in left if r[0].startswith("rrgate")))
 
-    def test_light_rail_crossings_only_with_data(self):
+    def test_level_crossing_posts_follow_the_road_off_the_carriageways(self):
+        """26th Street in Pittsburgh (40.4562, -79.9800): the track crosses at the corner of the street's 6 m stub into
+        Railroad Street, which runs beside the track. Each post stands beside the street before the track (not along
+        the stub's direction, 1 m off the street's centreline), and none on a carriageway (the far one fell in
+        Railroad Street)."""
+        street = [(124.0, 106.0), (120.0, 100.0), (120.0, 0.0)]     # (the stub first, as Overture's line runs)
+        f = features([[(0.0, 100.0), (250.0, 100.0)], street, [(0.0, 106.0), (250.0, 106.0)]],
+                     ["standard_gauge", "residential", "residential"], subtypes=["rail", "road", "road"])
+        half = roads.road_specs(f)[1].width / 2
+        (rail_y,), (street_x,), (side_y,) = [mapgeom.enu_xy(f, FRAME, roads.ground_parts(f, i)[0])[k][-1:]
+                                             for i, k in ((0, 1), (1, 0), (2, 1))]
+        rows = railways.crossing_props(FRAME, 0, 0, [f], lambda xy: np.full(len(xy), 10.0))
+        self.assertTrue(rows, "the street's approach from the south keeps its post")
+        for _g, x, y, *_ in rows:
+            self.assertAlmostEqual(x - street_x, half + railways.CROSSING_SIGN_OFF_M, delta=0.05, msg="the kerb side")
+            self.assertTrue(3.0 < rail_y - y < 8.0, f"before the track: {rail_y - y}")
+            self.assertGreater(abs(y - side_y), half, "not in Railroad Street")
         f = features([[(0.0, 100.0), (250.0, 100.0)], [(120.0, 0.0), (120.0, 250.0)]], ["light_rail", "secondary"],
                      subtypes=["rail", "road"])
         ground = lambda xy: np.zeros(len(xy))     # noqa: E731
